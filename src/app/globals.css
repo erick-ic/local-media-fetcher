@@ -2,26 +2,99 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@layer base {
+  /* 所有按钮禁用时统一的视觉与光标 */
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+:root {
+  /* 默认主题：靛蓝 */
+  --brand: 37 99 235;
+  --brand-strong: 29 78 216;
+}
+
+[data-theme="blue"] {
+  --brand: 37 99 235;
+  --brand-strong: 29 78 216;
+}
+
+[data-theme="apple"] {
+  --brand: 0 113 227;
+  --brand-strong: 0 91 184;
+}
+
+[data-theme="meta"] {
+  --brand: 8 102 255;
+  --brand-strong: 7 87 217;
+}
+
+[data-theme="telegram"] {
+  --brand: 0 119 168;
+  --brand-strong: 0 94 134;
+}
+
+[data-theme="youtube"] {
+  --brand: 217 0 0;
+  --brand-strong: 184 0 0;
+}
+
+[data-theme="netflix"] {
+  --brand: 229 9 20;
+  --brand-strong: 196 8 18;
+}
+
+[data-theme="instagram"] {
+  --brand: 216 27 96;
+  --brand-strong: 176 21 79;
+}
+
+[data-theme="spotify"] {
+  --brand: 14 122 53;
+  --brand-strong: 10 92 40;
+}
+
+[data-theme="whatsapp"] {
+  --brand: 11 107 96;
+  --brand-strong: 7 83 74;
+}
+
+[data-theme="discord"] {
+  --brand: 71 82 196;
+  --brand-strong: 60 69 165;
+}
+
+[data-theme="twitch"] {
+  --brand: 123 47 242;
+  --brand-strong: 100 32 201;
+}
+
+[data-theme="linkedin"] {
+  --brand: 10 102 194;
+  --brand-strong: 8 78 150;
+}
+
+[data-theme="reddit"] {
+  --brand: 217 58 0;
+  --brand-strong: 179 47 0;
+}
+
+[data-theme="x"] {
+  --brand: 15 20 25;
+  --brand-strong: 0 0 0;
 }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: #f5f5f7;
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
+::selection {
+  background-color: rgb(var(--brand) / 0.16);
+}
+
+/* 浅色主题下保持滚动条轻量 */
+html {
+  color-scheme: light;
 }

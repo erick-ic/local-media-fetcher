@@ -9,8 +9,12 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        background: "var(--background)",
-        foreground: "var(--foreground)",
+        brand: "rgb(var(--brand) / <alpha-value>)",
+        "brand-strong": "rgb(var(--brand-strong) / <alpha-value>)",
+      },
+      fontFamily: {
+        sans: ["var(--font-geist-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["var(--font-geist-mono)", "ui-monospace", "SFMono-Regular", "monospace"],
       },
     },
   },
