@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, Check, Palette } from "lucide-react";
+import { ArrowLeft, Check, Globe, Palette, Settings2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   DEFAULT_THEME,
@@ -10,14 +10,47 @@ import {
   THEME_STORAGE_KEY,
   type ThemeId,
 } from "@/lib/theme";
+import {
+  DEFAULT_NETWORK_SETTINGS,
+  NETWORK_STORAGE_KEY,
+  type NetworkSettings,
+} from "@/lib/platforms";
 
 export default function SettingsPage() {
   const [theme, setTheme] = useState<ThemeId>(DEFAULT_THEME);
+  const [network, setNetwork] = useState<NetworkSettings>(
+    DEFAULT_NETWORK_SETTINGS
+  );
 
   useEffect(() => {
-    const saved = localStorage.getItem(THEME_STORAGE_KEY);
-    if (isThemeId(saved)) setTheme(saved);
+    try {
+      const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+      if (isThemeId(savedTheme)) setTheme(savedTheme);
+
+      const savedNetworkRaw = localStorage.getItem(NETWORK_STORAGE_KEY);
+      if (savedNetworkRaw) {
+        const parsed = JSON.parse(savedNetworkRaw) as Partial<NetworkSettings>;
+        setNetwork({
+          cnDirect:
+            typeof parsed.cnDirect === "boolean"
+              ? parsed.cnDirect
+              : DEFAULT_NETWORK_SETTINGS.cnDirect,
+        });
+      }
+    } catch {
+      // 隐私模式下忽略
+    }
   }, []);
+
+  const toggleCnDirect = () => {
+    const next: NetworkSettings = { cnDirect: !network.cnDirect };
+    setNetwork(next);
+    try {
+      localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // 隐私模式下仅当前会话生效
+    }
+  };
 
   const selectTheme = (id: ThemeId) => {
     setTheme(id);
@@ -40,14 +73,58 @@ export default function SettingsPage() {
           返回控制台
         </Link>
         <div className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-900">
-          <Palette className="h-4 w-4 text-brand" />
-          主题设置
+          <Settings2 className="h-4 w-4 text-brand" />
+          偏好设置
         </div>
       </header>
 
+      {/* 网络分流 */}
       <section className="mt-6 rounded-[22px] border border-zinc-200/80 bg-white p-5 shadow-sm sm:p-6">
         <div className="flex items-baseline justify-between">
-          <h2 className="text-[15px] font-semibold tracking-tight text-zinc-900">
+          <h2 className="flex items-center gap-1.5 text-[15px] font-semibold tracking-tight text-zinc-900">
+            <Globe className="h-4 w-4 text-brand" />
+            网络分流
+          </h2>
+          <span className="font-mono text-[9.5px] tracking-[0.08em] text-zinc-400">
+            NETWORK ROUTING
+          </span>
+        </div>
+        <p className="mt-1 text-[12px] leading-5 text-zinc-500">
+          解析与下载时根据链接域名自动分流，无需手动切换国内 / 国际模式。
+        </p>
+
+        <div className="mt-4 flex items-center justify-between gap-4 rounded-2xl border border-zinc-200/80 bg-zinc-50/40 px-4 py-3.5">
+          <div className="min-w-0">
+            <p className="text-[12.5px] font-medium text-zinc-800">
+              国内平台强制直连
+            </p>
+            <p className="mt-0.5 text-[11px] leading-4 text-zinc-500">
+              Bilibili、小红书等国内站点自动绕过代理，避免风控、地区限制或绕路限速。
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={network.cnDirect}
+            onClick={toggleCnDirect}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+              network.cnDirect ? "bg-brand" : "bg-zinc-300"
+            }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition-transform ${
+                network.cnDirect ? "translate-x-[22px]" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </div>
+      </section>
+
+      {/* 主题色 */}
+      <section className="mt-4 rounded-[22px] border border-zinc-200/80 bg-white p-5 shadow-sm sm:p-6">
+        <div className="flex items-baseline justify-between">
+          <h2 className="flex items-center gap-1.5 text-[15px] font-semibold tracking-tight text-zinc-900">
+            <Palette className="h-4 w-4 text-brand" />
             主题色
           </h2>
           <span className="font-mono text-[9.5px] tracking-[0.08em] text-zinc-400">

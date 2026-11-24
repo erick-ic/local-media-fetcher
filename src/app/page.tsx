@@ -8,11 +8,12 @@ import {
   ClipboardPaste,
   Copy,
   FolderOpen,
+  Info,
   Link2,
   Loader2,
   Lock,
-  Palette,
   RefreshCw,
+  Settings2,
   Trash2,
   X,
 } from "lucide-react";
@@ -24,6 +25,15 @@ import {
   type ClipboardEvent,
   type KeyboardEvent,
 } from "react";
+import {
+  DEFAULT_NETWORK_SETTINGS,
+  extractUrlFromText,
+  NETWORK_STORAGE_KEY,
+  PLATFORM_RULES,
+  type NetworkSettings,
+  type PlatformRegion,
+  type PlatformRule,
+} from "@/lib/platforms";
 
 type CookieSource = "none" | "chrome" | "safari";
 type TaskStatus = "downloading" | "merging" | "done" | "error" | "canceled";
@@ -38,15 +48,19 @@ interface Preset {
 
 interface MediaInfo {
   sourceUrl: string;
+  normalizedUrl?: string;
   id: string;
   title: string;
   thumbnail: string | null;
   duration: string;
   durationSeconds: number | null;
   extractor: string;
+  platformId?: string | null;
+  region?: PlatformRegion;
   uploader: string | null;
   webpageUrl: string;
   presets: Preset[];
+  hint?: string | null;
 }
 
 interface DownloadTask {
@@ -129,31 +143,27 @@ const COOKIE_OPTIONS: { value: CookieSource; label: string }[] = [
   { value: "safari", label: "Safari" },
 ];
 
-interface Platform {
-  name: string;
-  mark: string;
-  tile: string;
-  needsLogin: boolean;
-}
+const GLOBAL_PLATFORMS = PLATFORM_RULES.filter(
+  (platform) => platform.region === "global"
+);
+const CN_PLATFORMS = PLATFORM_RULES.filter(
+  (platform) => platform.region === "cn"
+);
 
-const PLATFORMS: Platform[] = [
-  { name: "YouTube", mark: "▶", tile: "bg-[#ff0033]", needsLogin: false },
-  { name: "TikTok", mark: "♪", tile: "bg-zinc-900", needsLogin: false },
-  { name: "X", mark: "X", tile: "bg-zinc-900", needsLogin: false },
-  { name: "Facebook", mark: "f", tile: "bg-[#1877f2]", needsLogin: false },
-  {
-    name: "Instagram",
-    mark: "◎",
-    tile: "bg-gradient-to-br from-[#f9ce34] via-[#ee2a7b] to-[#6228d7]",
-    needsLogin: true,
-  },
-];
-
-/** 从混合分享文案中提取首个 http(s) 链接，并去掉结尾标点 */
-function extractUrl(text: string): string | null {
-  const match = text.match(/https?:\/\/[^\s"'<>]+/i);
-  if (!match) return null;
-  return match[0].replace(/[),.;，。；\]}]+$/, "");
+function readNetworkSettings(): NetworkSettings {
+  try {
+    const raw = localStorage.getItem(NETWORK_STORAGE_KEY);
+    if (!raw) return DEFAULT_NETWORK_SETTINGS;
+    const parsed = JSON.parse(raw) as Partial<NetworkSettings>;
+    return {
+      cnDirect:
+        typeof parsed.cnDirect === "boolean"
+          ? parsed.cnDirect
+          : DEFAULT_NETWORK_SETTINGS.cnDirect,
+    };
+  } catch {
+    return DEFAULT_NETWORK_SETTINGS;
+  }
 }
 
 function readErrorMessage(payload: unknown, fallback: string): string {
@@ -202,6 +212,9 @@ export default function Home() {
   const [health, setHealth] = useState<HealthState | null>(null);
   const [healthLoading, setHealthLoading] = useState(true);
   const [cookie, setCookie] = useState<CookieSource>("none");
+  const [network, setNetwork] = useState<NetworkSettings>(
+    DEFAULT_NETWORK_SETTINGS
+  );
   const [input, setInput] = useState("");
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
@@ -229,7 +242,7 @@ export default function Home() {
     void checkHealth();
   }, [checkHealth]);
 
-  // 恢复 Cookie 接力选择
+  // 恢复 Cookie 接力与网络分流设置
   useEffect(() => {
     try {
       const saved = localStorage.getItem(COOKIE_STORAGE_KEY);
@@ -239,6 +252,15 @@ export default function Home() {
     } catch {
       // 隐私模式下 localStorage 不可用
     }
+
+    const syncNetwork = () => setNetwork(readNetworkSettings());
+    syncNetwork();
+    window.addEventListener("focus", syncNetwork);
+    window.addEventListener("storage", syncNetwork);
+    return () => {
+      window.removeEventListener("focus", syncNetwork);
+      window.removeEventListener("storage", syncNetwork);
+    };
   }, []);
 
   // 恢复下载历史，并把上次未完成的任务标记为中断
@@ -347,7 +369,7 @@ export default function Home() {
   const pasteFromClipboard = async () => {
     try {
       const text = await navigator.clipboard.readText();
-      const url = extractUrl(text);
+      const url = extractUrlFromText(text);
       setInput(url ?? text.trim());
       setParseError(url ? null : "剪贴板中未找到有效链接");
     } catch {
@@ -357,7 +379,7 @@ export default function Home() {
 
   const handlePaste = (event: ClipboardEvent<HTMLInputElement>) => {
     const text = event.clipboardData.getData("text");
-    const url = extractUrl(text);
+    const url = extractUrlFromText(text);
     if (url) {
       event.preventDefault();
       setInput(url);
@@ -367,7 +389,7 @@ export default function Home() {
 
   const handleParse = async () => {
     if (parsing) return;
-    const url = extractUrl(input);
+    const url = extractUrlFromText(input);
     if (!url) {
       setParseError("未识别到有效链接，请粘贴包含 http(s) 链接的文本");
       return;
@@ -385,6 +407,7 @@ export default function Home() {
         body: JSON.stringify({
           url,
           browserCookie: cookie === "none" ? undefined : cookie,
+          network,
         }),
       });
       const payload: unknown = await response.json();
@@ -485,6 +508,7 @@ export default function Home() {
           url,
           formatType: format,
           browserCookie: cookie === "none" ? undefined : cookie,
+          network,
         }),
         signal: controller.signal,
       });
@@ -542,7 +566,7 @@ export default function Home() {
 
     await runDownload({
       sourceKey: `${media.extractor}:${media.id}`,
-      url: media.sourceUrl,
+      url: media.normalizedUrl || media.sourceUrl,
       format,
       formatLabel:
         media.presets.find((preset) => preset.key === format)?.label ?? format,
@@ -712,11 +736,11 @@ export default function Home() {
             </div>
             <Link
               href="/settings"
-              aria-label="主题设置"
-              title="主题设置"
+              aria-label="偏好设置"
+              title="偏好设置（网络与主题）"
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-zinc-200/80 bg-white text-zinc-500 transition-colors hover:border-zinc-300 hover:text-zinc-800"
             >
-              <Palette className="h-3.5 w-3.5" />
+              <Settings2 className="h-3.5 w-3.5" />
             </Link>
           </div>
         </header>
@@ -786,34 +810,22 @@ export default function Home() {
         {/* 链接输入 */}
         <section className="mt-8">
           <div className="rounded-[22px] border border-zinc-200/70 bg-white p-4 shadow-[0_1px_2px_rgba(16,24,40,0.04),0_12px_32px_-20px_rgba(16,24,40,0.25)]">
-            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2 border-b border-zinc-100 pb-3">
-              <span className="mr-0.5 text-[10.5px] font-medium text-zinc-400">
-                支持平台
-              </span>
-              {PLATFORMS.map((platform) => (
-                <span
-                  key={platform.name}
-                  title={
-                    platform.needsLogin
-                      ? `${platform.name}：需要开启浏览器 Cookie 接力`
-                      : `${platform.name}：公开内容免登录`
-                  }
-                  className="inline-flex items-center gap-1 rounded-full border border-zinc-200/70 bg-zinc-50/80 py-[3px] pl-1 pr-2 text-[10.5px] font-medium text-zinc-600"
-                >
-                  <span
-                    className={`flex h-4 w-4 items-center justify-center rounded-[5px] text-[8px] font-semibold leading-none text-white ${platform.tile}`}
-                  >
-                    {platform.mark}
-                  </span>
-                  {platform.name}
-                  {platform.needsLogin && (
-                    <>
-                      <Lock className="h-2.5 w-2.5 text-amber-500" />
-                      <span className="text-[9px] text-amber-600">需登录</span>
-                    </>
-                  )}
+            <div className="space-y-2 border-b border-zinc-100 pb-3">
+              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1.5">
+                <span className="mr-0.5 text-[10.5px] font-medium text-zinc-400">
+                  国际
                 </span>
-              ))}
+                {GLOBAL_PLATFORMS.map((platform) => (
+                  <PlatformBadge key={platform.id} platform={platform} />
+                ))}
+                <span className="mx-1 hidden h-3 w-px bg-zinc-200 sm:inline-block" />
+                <span className="mr-0.5 text-[10.5px] font-medium text-zinc-400">
+                  国内
+                </span>
+                {CN_PLATFORMS.map((platform) => (
+                  <PlatformBadge key={platform.id} platform={platform} />
+                ))}
+              </div>
             </div>
 
             <div className="relative mt-3">
@@ -836,7 +848,7 @@ export default function Home() {
 
             <div className="mt-2.5 flex items-center justify-between gap-2 px-1">
               <p className="hidden text-[10.5px] text-zinc-400 sm:block">
-                自动提取纯净链接 · 回车直接解析
+                支持中英文分享口令自动提取 · 国内平台默认直连 · 回车解析
               </p>
               <div className="flex flex-1 gap-2 sm:flex-none">
                 <button
@@ -898,9 +910,16 @@ export default function Home() {
               </div>
 
               <div className="min-w-0 flex-1 pt-0.5">
-                <span className="inline-block rounded-full bg-zinc-100 px-2 py-0.5 font-mono text-[9.5px] tracking-wide text-zinc-500">
-                  {media.extractor}
-                </span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="inline-block rounded-full bg-zinc-100 px-2 py-0.5 font-mono text-[9.5px] tracking-wide text-zinc-500">
+                    {media.extractor}
+                  </span>
+                  {media.region === "cn" && network.cnDirect && (
+                    <span className="inline-block rounded-full bg-emerald-50 px-2 py-0.5 text-[9.5px] font-medium text-emerald-600">
+                      国内直连
+                    </span>
+                  )}
+                </div>
                 <h2 className="mt-2 line-clamp-2 text-[14.5px] font-semibold leading-6 text-zinc-900">
                   {media.title}
                 </h2>
@@ -909,6 +928,13 @@ export default function Home() {
                 </p>
               </div>
             </div>
+
+            {media.hint && (
+              <div className="mx-1 mt-2.5 flex items-start gap-1.5 rounded-xl border border-amber-200/70 bg-amber-50/70 px-3 py-2 text-[11px] leading-4 text-amber-700">
+                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+                <span>{media.hint}</span>
+              </div>
+            )}
 
             <div className="mt-3 px-1 pb-0.5">
               <p className="text-[10.5px] font-medium text-zinc-400">选择画质</p>
@@ -1215,5 +1241,38 @@ function TaskRow({
         </div>
       </div>
     </div>
+  );
+}
+
+function PlatformBadge({ platform }: { platform: PlatformRule }) {
+  const needsCookie = platform.cookiePolicy === "required";
+  const hint =
+    platform.cookieHint ||
+    (platform.region === "cn"
+      ? `${platform.label}：公开内容免登录，国内自动直连`
+      : `${platform.label}：公开内容免登录`);
+
+  return (
+    <a
+      href={platform.homeUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={`${hint}（点击打开 ${platform.label}）`}
+      className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-zinc-200/70 bg-zinc-50/80 py-[3px] pl-1 pr-2 text-[10.5px] font-medium text-zinc-600 transition-all hover:border-zinc-300 hover:bg-white hover:text-zinc-900 hover:shadow-sm active:scale-[0.98]"
+    >
+      <span
+        style={{ background: platform.tileBg }}
+        className="flex h-4 w-4 items-center justify-center rounded-[5px] text-[8px] font-semibold leading-none text-white"
+      >
+        {platform.mark}
+      </span>
+      {platform.label}
+      {needsCookie && (
+        <>
+          <Lock className="h-2.5 w-2.5 text-amber-500" />
+          <span className="text-[9px] text-amber-600">需Cookie</span>
+        </>
+      )}
+    </a>
   );
 }

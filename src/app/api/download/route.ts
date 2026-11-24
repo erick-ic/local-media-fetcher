@@ -8,62 +8,27 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { NextResponse } from "next/server";
 import {
-  DOWNLOADS_DIR,
   TOOL_ENV,
-  authErrorHint,
-  cookieErrorHint,
+  errorMessage,
   isHttpUrl,
   lastMeaningfulLine,
   normalizeCookieSource,
+  normalizeNetworkSettings,
+  platformErrorHint,
 } from "@/lib/media";
+import { prepareDownloadCommand, resolveFormatArgs } from "@/lib/extractors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
 
-const BEST_FORMAT_ARGS = [
-  "-f",
-  "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-  "--merge-output-format",
-  "mp4",
-];
-
-/** 解析动态画质标识：best / mp3 / 2160p / 1440p / 1080p … */
-function resolveFormatArgs(value: unknown): string[] | null {
-  if (value === "mp3") {
-    return ["-x", "--audio-format", "mp3", "--audio-quality", "0"];
-  }
-  if (value === "best") return BEST_FORMAT_ARGS;
-
-  if (typeof value === "string") {
-    const match = value.match(/^(\d{3,4})p$/);
-    if (match) {
-      const height = Number(match[1]);
-      if (height >= 144 && height <= 4320) {
-        return [
-          "-f",
-          `bestvideo[height<=${height}][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}][ext=mp4]/best`,
-          "--merge-output-format",
-          "mp4",
-        ];
-      }
-    }
-  }
-
-  return null;
-}
-
-const OUTPUT_TEMPLATE = path.join(
-  DOWNLOADS_DIR,
-  "%(title).80s_%(id)s.%(ext)s"
-);
-
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
     url?: unknown;
     formatType?: unknown;
     browserCookie?: unknown;
+    network?: unknown;
   } | null;
 
   const url = typeof body?.url === "string" ? body.url.trim() : "";
@@ -74,7 +39,8 @@ export async function POST(request: Request) {
     );
   }
 
-  const formatArgs = resolveFormatArgs(body?.formatType);
+  const formatType = typeof body?.formatType === "string" ? body.formatType : "";
+  const formatArgs = resolveFormatArgs(formatType);
   if (!formatArgs) {
     return NextResponse.json(
       { ok: false, message: "不支持的画质选项" },
@@ -82,17 +48,25 @@ export async function POST(request: Request) {
     );
   }
   const cookie = normalizeCookieSource(body?.browserCookie);
+  const network = normalizeNetworkSettings(body?.network);
 
-  // 数组传参，避免任何 shell 字符串拼接
-  const args = [
-    "--newline",
-    "--no-playlist",
-    "--progress",
-    ...formatArgs,
-  ];
-  if (cookie) args.push("--cookies-from-browser", cookie);
-  args.push("-o", OUTPUT_TEMPLATE, url);
+  let prepared: { args: string[]; platformId: string | undefined };
+  try {
+    prepared = await prepareDownloadCommand({
+      url,
+      formatType,
+      formatArgs,
+      cookie,
+      network,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { ok: false, message: errorMessage(error, "准备下载参数失败") },
+      { status: 422 }
+    );
+  }
 
+  const { args, platformId } = prepared;
   const encoder = new TextEncoder();
   let child: ChildProcessWithoutNullStreams | null = null;
   let mediaChild: ChildProcess | null = null;
@@ -112,6 +86,23 @@ export async function POST(request: Request) {
     }
   };
 
+  const runFfmpeg = (ffmpegArgs: string[]): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      const ffmpegProcess = spawn("ffmpeg", ffmpegArgs, {
+        env: TOOL_ENV,
+        stdio: "ignore",
+      });
+      mediaChild = ffmpegProcess;
+      ffmpegProcess.on("error", () => {
+        mediaChild = null;
+        resolve(false);
+      });
+      ffmpegProcess.on("close", (exitCode) => {
+        mediaChild = null;
+        resolve(exitCode === 0);
+      });
+    });
+
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const send = (payload: Record<string, unknown>) => {
@@ -126,13 +117,16 @@ export async function POST(request: Request) {
       };
 
       /**
-       * macOS 的 QuickTime / 预览无法解码 MP4 容器中的 VP9 / AV1。
-       * 下载完成后探测编码，必要时转码为 H.264，保证双击即可播放。
+       * 确保下载完成的视频可被 macOS QuickTime / 访达预览直接打开：
+       * - H.264 直接放行
+       * - HEVC 若封装标签为 hev1（常见于 B 站），无损秒级重封装为 hvc1
+       * - VP9 / AV1 等优先使用 Apple Silicon VideoToolbox 硬件加速转 H.264，失败回退 libx264
        */
       const ensureMacPlayable = async (input: string): Promise<string> => {
         if (closed) return input;
 
         let codec = "";
+        let codecTag = "";
         try {
           const { stdout } = await execFileAsync(
             "ffprobe",
@@ -142,20 +136,22 @@ export async function POST(request: Request) {
               "-select_streams",
               "v:0",
               "-show_entries",
-              "stream=codec_name",
+              "stream=codec_name,codec_tag_string",
               "-of",
-              "default=nw=1:nk=1",
+              "csv=p=0",
               input,
             ],
             { env: TOOL_ENV, timeout: 15000 }
           );
-          codec = stdout.trim();
+          const [name = "", tag = ""] = stdout.trim().split(",");
+          codec = name.trim().toLowerCase();
+          codecTag = tag.trim().toLowerCase();
         } catch {
-          // 探测失败时保留原文件
           return input;
         }
 
-        if (!codec || codec === "h264" || codec === "hevc") return input;
+        if (!codec || codec === "h264") return input;
+        if (codec === "hevc" && codecTag === "hvc1") return input;
         if (closed) return input;
 
         send({ status: "merging" });
@@ -163,43 +159,74 @@ export async function POST(request: Request) {
         const parsed = path.parse(input);
         const tempPath = path.join(parsed.dir, `${parsed.name}.compat.mp4`);
 
-        const converted = await new Promise<boolean>((resolve) => {
-          const ffmpegProcess = spawn(
-            "ffmpeg",
-            [
-              "-y",
-              "-v",
-              "error",
-              "-i",
-              input,
-              "-c:v",
-              "libx264",
-              "-preset",
-              "veryfast",
-              "-crf",
-              "20",
-              "-pix_fmt",
-              "yuv420p",
-              "-c:a",
-              "aac",
-              "-b:a",
-              "192k",
-              "-movflags",
-              "+faststart",
-              tempPath,
-            ],
-            { env: TOOL_ENV, stdio: "ignore" }
-          );
-          mediaChild = ffmpegProcess;
-          ffmpegProcess.on("error", () => {
-            mediaChild = null;
-            resolve(false);
-          });
-          ffmpegProcess.on("close", (exitCode) => {
-            mediaChild = null;
-            resolve(exitCode === 0);
-          });
-        });
+        let converted = false;
+        if (codec === "hevc") {
+          // 无损重封装 hev1 -> hvc1，耗时通常 <1 秒且零画质损失
+          converted = await runFfmpeg([
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            input,
+            "-c",
+            "copy",
+            "-tag:v",
+            "hvc1",
+            "-movflags",
+            "+faststart",
+            tempPath,
+          ]);
+        }
+
+        if (!converted && !closed) {
+          // 优先使用 macOS VideoToolbox 硬件编码加速
+          converted = await runFfmpeg([
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            input,
+            "-c:v",
+            "h264_videotoolbox",
+            "-q:v",
+            "65",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            tempPath,
+          ]);
+        }
+
+        if (!converted && !closed) {
+          // 硬件编码不可用时自动回退 libx264 软编码
+          converted = await runFfmpeg([
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            input,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            tempPath,
+          ]);
+        }
 
         if (!converted) {
           await rm(tempPath, { force: true }).catch(() => {});
@@ -268,7 +295,9 @@ export async function POST(request: Request) {
           return;
         }
 
-        const alreadyMatch = line.match(/\[download\]\s+(.+?)\s+has already been downloaded/);
+        const alreadyMatch = line.match(
+          /\[download\]\s+(.+?)\s+has already been downloaded/
+        );
         if (alreadyMatch) lastDestination = alreadyMatch[1].trim();
       };
 
@@ -327,7 +356,7 @@ export async function POST(request: Request) {
           const finalPath =
             mergedPath || audioPath || lastDestination || undefined;
 
-          if (!finalPath || body?.formatType === "mp3") {
+          if (!finalPath || formatType === "mp3") {
             complete(finalPath);
             return;
           }
@@ -346,8 +375,7 @@ export async function POST(request: Request) {
         send({
           status: "error",
           message:
-            cookieErrorHint(detail) ||
-            authErrorHint(detail, Boolean(cookie)) ||
+            platformErrorHint(detail, platformId, Boolean(cookie)) ||
             detail ||
             `yt-dlp 退出码 ${code ?? "未知"}`,
         });

@@ -1,0 +1,16 @@
+[
+  {
+    "name": "YouTube",
+    "url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+  },
+  {
+    "name": "Bilibili",
+    "url": "https://www.bilibili.com/video/BV1GJ411x7h7"
+  },
+  {
+    "name": "小红书（填有效分享链接后将 skip 改为 false）",
+    "url": "",
+    "skip": true,
+    "reason": "需填入含 xsec_token 的有效分享链接"
+  }
+]

@@ -27,6 +27,7 @@ yarn-error.log*
 
 # local env files
 .env*.local
+scripts/smoke-urls.local.json
 
 # vercel
 .vercel
